@@ -1,4 +1,5 @@
 import { DAYS } from './scheduler.js';
+import { classAdvisorFor } from './data-model.js';
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const replaceAll = (text, from, to) => text.split(from).join(to);
@@ -93,7 +94,7 @@ function fillHeader(templateHtml, model, className, logoSrc) {
   doc = replaceAll(doc, '%%ODD_EVEN%%', esc(metadata.oddEven || 'ODD'));
   doc = replaceAll(doc, '%%ACADEMIC_YEAR%%', esc(metadata.academicYear || ''));
   doc = replaceAll(doc, '%%WEF%%', esc(metadata.effectiveDate || ''));
-  doc = replaceAll(doc, '%%CLASS_ADVISOR%%', esc(metadata.classAdvisor || ''));
+  doc = replaceAll(doc, '%%CLASS_ADVISOR%%', esc(classAdvisorFor(model, className)));
   doc = replaceAll(doc, '%%SECTION%%', esc(metadata.section || sectionOf(className)));
   return doc;
 }

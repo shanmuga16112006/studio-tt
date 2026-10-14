@@ -102,3 +102,33 @@ export function normalizeRows(rows) {
   const manualReservations = labs.filter(lab => lab.day && lab.startPeriod).map(lab => ({ subjectId: lab.subjectId, className: lab.className, kind: 'LAB', mode: 'continuous', session: lab.session || '', day: lab.day, periodNumbers: Array.from({ length: Number(lab.length || 1) }, (_, offset) => Number(lab.startPeriod) + offset) }));
   return { classes, subjects, teachers, staff: Object.values(teachers), labs, manualReservations, manualSelectionRequired: true, weeklyHours, metadata: {}, errors: [] };
 }
+
+export function classAdvisorFor(model, className) {
+  if (!model) return '';
+  const staff = Array.isArray(model.staff) ? model.staff : Object.values(model.teachers || {});
+  const cc = staff.find(person => (person.ccFor || []).includes(className));
+  if (cc?.name) return cc.name;
+  return model.metadata?.classAdvisors?.[className] || model.metadata?.classAdvisor || '';
+}
+
+export function setClassCc(teachers, person, className) {
+  const active = (person.ccFor || []).includes(className);
+  Object.values(teachers).forEach(item => { if (item !== person) item.ccFor = (item.ccFor || []).filter(entry => entry !== className); });
+  person.ccFor = active ? (person.ccFor || []).filter(entry => entry !== className) : [...(person.ccFor || []), className];
+  return !active;
+}
+
+export function departmentOf(className) {
+  const cleaned = clean(className);
+  const base = cleaned.replace(/[(\[]\s*[A-Za-z0-9]{1,3}\s*[)\]]\s*$/, '').trim();
+  return base || cleaned;
+}
+
+export function setClassHod(teachers, person, className) {
+  const department = departmentOf(className);
+  const active = (person.hodFor || []).some(entry => departmentOf(entry) === department);
+  person.hodFor = active
+    ? (person.hodFor || []).filter(entry => departmentOf(entry) !== department)
+    : [...(person.hodFor || []).filter(entry => departmentOf(entry) !== department), department];
+  return !active;
+}

@@ -45,3 +45,27 @@ test('renders the individual (teacher) timetable template with that teacher\'s a
   assert.doesNotMatch(html, /%%DOC_/);
   assert.doesNotMatch(html, /%%FACULTY%%/);
 });
+
+test('shows the selected CC as the Class Advisor in the exported timetable', async () => {
+  const week = () => ({ MON: Array(8).fill(null), TUE: Array(8).fill(null), WED: Array(8).fill(null), THU: Array(8).fill(null), FRI: Array(8).fill(null), SAT: Array(8).fill(null) });
+  const schedule = { ...week(), className: 'AIDS' };
+  const model = {
+    metadata: {},
+    staff: [{ name: 'Mrs. M. Srimathi', ccFor: ['AIDS'] }, { name: 'Mr. G. Kannan', ccFor: [] }],
+    subjects: []
+  };
+  const html = await buildExportDocument(schedule, model, 'class', templateHtml);
+  assert.match(html, /Class Advisor[\s\S]{0,200}Mrs\. M\. Srimathi/);
+  assert.doesNotMatch(html, /%%CLASS_ADVISOR%%/);
+});
+
+test('fills the Year / Semester and W.e.f. fields in the exported timetable', async () => {
+  const week = () => ({ MON: Array(8).fill(null), TUE: Array(8).fill(null), WED: Array(8).fill(null), THU: Array(8).fill(null), FRI: Array(8).fill(null), SAT: Array(8).fill(null) });
+  const schedule = { ...week(), className: 'AIDS' };
+  const model = { metadata: { yearSem: 'III / V Semester', effectiveDate: '14-10-2026' }, staff: [], subjects: [] };
+  const html = await buildExportDocument(schedule, model, 'class', templateHtml);
+  assert.match(html, /Year \/ Sem[\s\S]{0,160}III \/ V Semester/);
+  assert.match(html, /W\.e\.f[\s\S]{0,160}14-10-2026/);
+  assert.doesNotMatch(html, /%%YEAR_SEM%%/);
+  assert.doesNotMatch(html, /%%WEF%%/);
+});

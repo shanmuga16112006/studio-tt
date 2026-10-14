@@ -1,4 +1,5 @@
 import { reservationSlots } from './manual-periods.js';
+import { departmentOf } from './data-model.js';
 
 export const DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 export const SLOT_DEFS = [
@@ -16,6 +17,7 @@ export function extracurricularStarts(length) {
     for (let start = 2; start + length - 1 <= 7; start++) starts.push(start);
     return starts;
   }
+  if (length === 1) starts.push(0);
   for (const [first, last] of ACTIVITY_TEACHING_RUNS) {
     for (let start = first; start <= last; start++) {
       if (start + length - 1 <= last) starts.push(start);
@@ -40,11 +42,30 @@ export function createDefaultSlots() { return SLOT_DEFS.map((slot, index) => ({ 
 const emptyWeek = () => Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
 const teacherName = subject => subject.teacher.split(/[,;]/)[0].trim();
 const teacherRecord = (model, teacher) => model.teachers?.[teacher] || Object.values(model.teachers || {}).find(record => record.name === teacher || record.name?.startsWith(teacher)) || {};
-const isHodFor = (record, className) => record.hodFor?.includes(className) || record.isHod === true;
+const isHodFor = (record, className) => (record.hodFor || []).some(entry => departmentOf(entry) === departmentOf(className)) || record.isHod === true;
 const barsFirstPeriod = (record, className, day) => isHodFor(record, className) || (record.ccFor?.includes(className) && day !== 'MON');
+// Single source of truth for the HOD/CC Period-1 restriction. HOD applies to every class of the
+// department on every day (R1); CC applies only to its own class and only outside Monday (R11).
+export function firstPeriodRoleBlock(model, teacher, className, day) {
+  const record = teacherRecord(model, teacher);
+  if (!barsFirstPeriod(record, className, day)) return null;
+  return { rule: isHodFor(record, className) ? 'R1' : 'R11', day, period: 1, message: `${teacher} cannot teach Period 1 for this class.` };
+}
 const externalHours = (model, teacher, day) => Number(teacherRecord(model, teacher).externalHours?.[day] || 0);
 const unavailable = (model, teacher, day, period) => (teacherRecord(model, teacher).unavailable || []).some(x => x.day === day && x.period === period);
 const fixedLabDays = (model, subjectId) => new Set((model.labs || []).filter(lab => lab.subjectId === subjectId).map(lab => lab.day).filter(Boolean));
+const isSinglePeriodActivity = subject => Boolean(subject?.isExtracurricular) && Number(subject.theoryPeriods) === 1;
+const firstPeriodActivityTaken = (schedule, day) => DAYS.some(other => other !== day && schedule?.[other]?.[0]?.kind === 'activity');
+
+export const labPeriodsOnDay = (schedule, subjectId, day) =>
+  (schedule?.[day] || []).filter(cell => cell?.subjectId === subjectId && cell.kind === 'lab').length;
+
+export function theoryDailyCap(schedule, subject, day) {
+  const labPeriods = labPeriodsOnDay(schedule, subject.id, day);
+  if (labPeriods >= 3) return 0;
+  if (labPeriods >= 1) return 1;
+  return subject.theoryPeriods > DAYS.length ? 2 : 1;
+}
 
 const labWindows = (model, lab, subject) => {
   const length = Number(lab.length || lab.labPeriods || subject.labPeriods || 2);
@@ -162,15 +183,52 @@ export function checkExtracurricularSchedule(schedule, model) {
       diagnostics.push({ ...base, day, message: `${subject.name} must occupy consecutive periods without a gap, but its periods on ${day} are ${periods.map(period => period + 1).join(', ')}. R23 forbids splitting or shortening the block.` });
       continue;
     }
-    if (periods[0] <= 1) {
+    const allowedSinglePeriodStart = periods[0] === 0 && length === 1;
+    if (periods[0] <= 1 && !allowedSinglePeriodStart) {
       diagnostics.push({ ...base, day, period: periods[0] + 1, message: `${subject.name} cannot be scheduled in Period ${periods[0] + 1}. Extracurricular subjects cannot start in Period 1 or Period 2; the first possible starting period is Period 3.` });
       continue;
     }
-    if (length <= 2) {
+    if (length <= 2 && !allowedSinglePeriodStart) {
       const runOf = period => ACTIVITY_TEACHING_RUNS.findIndex(([first, last]) => period >= first && period <= last);
       if (periods.some(period => runOf(period) === -1) || new Set(periods.map(runOf)).size !== 1) {
         const label = `A ${length}-period extracurricular activity must stay inside one uninterrupted teaching run and may not cross a Break or Lunch; only activities of 3 or more periods may span a Break or Lunch.`;
         diagnostics.push({ ...base, day, message: `${subject.name} occupies ${periods.map(period => period + 1).join(', ')} on ${day}, which crosses a Break or Lunch. ${label}` });
+      }
+    }
+  }
+  const firstPeriodDays = DAYS.filter(day => (schedule[day] || [])[0]?.kind === 'activity');
+  if (firstPeriodDays.length > 1) {
+    diagnostics.push({ rule: 'R26', severity: 'error', className: forClass, subjectId: (schedule[firstPeriodDays[1]] || [])[0]?.subjectId, day: firstPeriodDays[1], period: 1, message: `A single-period extracurricular may occupy Period 1 only once a week, but Period 1 holds an activity on ${firstPeriodDays.length} days (${firstPeriodDays.join(', ')}). R26 allows exactly one such placement per week.` });
+  }
+  return diagnostics;
+}
+
+export function checkDailyLabTheoryRestriction(schedule, model) {
+  const diagnostics = [];
+  const forClass = schedule?.className;
+  for (const day of DAYS) {
+    const bySubject = new Map();
+    for (const cell of (schedule[day] || []).filter(Boolean)) {
+      if (!cell.subjectId) continue;
+      const entry = bySubject.get(cell.subjectId) || { lab: [], theory: [] };
+      if (cell.kind === 'lab') entry.lab.push(cell.period);
+      else if (cell.kind === 'theory') entry.theory.push(cell.period);
+      bySubject.set(cell.subjectId, entry);
+    }
+    for (const [subjectId, entry] of bySubject) {
+      const labPeriods = entry.lab.length;
+      if (!labPeriods) continue;
+      const subject = model.subjects.find(item => item.id === subjectId);
+      const label = subject?.name || subjectId;
+      const base = { rule: 'R25', severity: 'error', className: forClass || subject?.className, subjectId, day };
+      if (labPeriods >= 3 && entry.theory.length > 0) {
+        diagnostics.push({ ...base, message: `${label} has ${labPeriods} lab periods on ${day}, so it must not be scheduled for any theory period that day (R25).` });
+      } else if (labPeriods === 2 && entry.theory.length > 1) {
+        diagnostics.push({ ...base, message: `${label} has exactly 2 lab periods on ${day}, so at most 1 theory period is allowed, but ${entry.theory.length} were scheduled (R25).` });
+      }
+      const sorted = [...entry.lab].sort((left, right) => left - right);
+      if (sorted.some((period, index) => index > 0 && period !== sorted[index - 1] + 1)) {
+        diagnostics.push({ ...base, message: `${label} lab periods on ${day} (${sorted.map(period => period + 1).join(', ')}) are not continuous; R25 requires the lab block to keep its continuous required duration.` });
       }
     }
   }
@@ -183,10 +241,13 @@ export function checkSchedule(schedule, model) {
     const cells = schedule[day] || [];
     const seen = new Map();
     for (const cell of cells.filter(Boolean)) {
-      const record = teacherRecord(model, cell.teacher);
-      if (cell.period === 0 && barsFirstPeriod(record, schedule.className, day)) diagnostics.push({ rule: isHodFor(record, schedule.className) ? 'R1' : 'R11', severity: 'error', day, period: 1, message: `${cell.teacher} cannot teach Period 1 for this class.` });
+      const roleBlock = cell.period === 0 ? firstPeriodRoleBlock(model, cell.teacher, schedule.className, day) : null;
+      if (roleBlock) diagnostics.push({ ...roleBlock, severity: 'error' });
       if (unavailable(model, cell.teacher, day, cell.period)) diagnostics.push({ rule: 'R17', severity: 'error', day, period: cell.period + 1, message: `${cell.teacher} is unavailable.` });
-      if (cell.kind === 'activity' && cell.period <= 1) diagnostics.push({ rule: 'R23', severity: 'error', day, period: cell.period + 1, subjectId: cell.subjectId, message: `Extracurricular subjects cannot be scheduled in Period ${cell.period + 1}. The first possible starting period is Period 3.` });
+      if (cell.kind === 'activity' && cell.period <= 1) {
+        const activitySubject = model.subjects.find(item => item.id === cell.subjectId);
+        if (!(cell.period === 0 && isSinglePeriodActivity(activitySubject))) diagnostics.push({ rule: 'R23', severity: 'error', day, period: cell.period + 1, subjectId: cell.subjectId, message: `Extracurricular subjects cannot be scheduled in Period ${cell.period + 1}. The first possible starting period is Period 3.` });
+      }
       if (cell.kind === 'library' && cell.period <= 1) diagnostics.push({ rule: 'R22', severity: 'error', day, period: cell.period + 1, subjectId: cell.subjectId, message: `Library periods cannot be scheduled in Period ${cell.period + 1}. The earliest Library placement is Period 3.` });
       if (cell.kind === 'theory') seen.set(cell.subjectId, (seen.get(cell.subjectId) || 0) + 1);
     }
@@ -204,6 +265,7 @@ const firstPeriodSubjects = DAYS.map(day => schedule[day]?.[0]?.subjectId).filte
   const repeatedFirstPeriod = firstPeriodSubjects.find((subjectId, index) => firstPeriodSubjects.indexOf(subjectId) !== index);
   if (repeatedFirstPeriod) diagnostics.push({ rule: 'R20', severity: 'error', subjectId: repeatedFirstPeriod, message: 'The same subject cannot occupy Period 1 on more than one day.' });
   diagnostics.push(...checkExtracurricularSchedule(schedule, model));
+  diagnostics.push(...checkDailyLabTheoryRestriction(schedule, model));
   return diagnostics;
 }
 
@@ -292,7 +354,7 @@ function generateTimetableAttempt(model, options = {}) {
     if (teacherBusy.get(busyKey)?.has(teacher) && !isCombinedSession(subject, day, period)) return false;
     const record = teacherRecord(model, teacher);
     if (period === 0 && barsFirstPeriod(record, subject.className, day)) return false;
-    if (kind === 'activity' && (period === 0 || period === 1)) return false;
+    if (kind === 'activity' && period <= 1 && !(period === 0 && isSinglePeriodActivity(subject) && !firstPeriodActivityTaken(schedule, day))) return false;
     if (isLibrarySlot(subject, kind) && (period === 0 || period === 1)) return false;
     if (!isCombinedSession(subject, day, period)) {
       if (teacherCrossClassConflict(teacher, day, period, subject.className)) return false;
@@ -301,7 +363,7 @@ function generateTimetableAttempt(model, options = {}) {
     const dayCells = schedule[day];
     if (kind === 'theory') {
       const sameDay = dayCells.filter(cell => cell?.subjectId === subject.id && cell.kind === 'theory').length;
-      const dailyCap = fixedLabDays(model, subject.id).has(day) ? 1 : (subject.theoryPeriods > DAYS.length ? 2 : 1);
+      const dailyCap = theoryDailyCap(schedule, subject, day);
       if (sameDay >= dailyCap) return false;
       if (dayCells[period - 1]?.subjectId === subject.id || dayCells[period + 1]?.subjectId === subject.id) return false;
       if (period === 0 && DAYS.some(otherDay => otherDay !== day && schedule[otherDay][0]?.subjectId === subject.id)) return false;
@@ -328,7 +390,7 @@ function generateTimetableAttempt(model, options = {}) {
     if (teacherBusy.get(busyKey)?.has(teacher) && !isCombinedSession(subject, day, period)) return false;
     const record = teacherRecord(model, teacher);
     if (period === 0 && barsFirstPeriod(record, subject.className, day)) return false;
-    if (kind === 'activity' && (period === 0 || period === 1)) return false;
+    if (kind === 'activity' && period <= 1 && !(period === 0 && isSinglePeriodActivity(subject) && !firstPeriodActivityTaken(schedule, day))) return false;
     if (isLibrarySlot(subject, kind) && (period === 0 || period === 1)) return false;
     if (!isCombinedSession(subject, day, period)) {
       if (teacherCrossClassConflict(teacher, day, period, subject.className)) return false;
@@ -337,7 +399,7 @@ function generateTimetableAttempt(model, options = {}) {
     const dayCells = schedule[day];
     if (kind === 'theory') {
       const sameDay = dayCells.filter(cell => cell?.subjectId === subject.id && cell.kind === 'theory').length;
-      const dailyCap = fixedLabDays(model, subject.id).has(day) ? 1 : (subject.theoryPeriods > DAYS.length ? 2 : 1);
+      const dailyCap = theoryDailyCap(schedule, subject, day);
       if (sameDay >= dailyCap) return false;
       if (dayCells[period - 1]?.subjectId === subject.id || dayCells[period + 1]?.subjectId === subject.id) return false;
       if (period === 0 && DAYS.some(otherDay => otherDay !== day && schedule[otherDay][0]?.subjectId === subject.id)) return false;
@@ -357,7 +419,10 @@ function generateTimetableAttempt(model, options = {}) {
     if (unavailable(model, teacher, day, period)) return `${teacher} is unavailable at ${day} P${period + 1}`;
     const record = teacherRecord(model, teacher);
     if (period === 0 && barsFirstPeriod(record, subject.className, day)) return `Period 1 is barred for the HOD/CC teacher ${teacher}${day === 'MON' ? '' : ' on this day'}`;
-    if (kind === 'activity' && period <= 1) return `Period ${period + 1} is barred for extracurricular activities`;
+    if (kind === 'activity' && period <= 1) {
+      if (period !== 0 || !isSinglePeriodActivity(subject)) return `Period ${period + 1} is barred for extracurricular activities`;
+      if (firstPeriodActivityTaken(schedule, day)) return `Period 1 already holds the week's one allowed single-period extracurricular`;
+    }
     if (isLibrarySlot(subject, kind) && period <= 1) return `Period ${period + 1} is barred for Library periods (earliest is Period 3)`;
     if (!isCombinedSession(subject, day, period)) {
       if (teacherCrossClassConflict(teacher, day, period, subject.className)) return `${teacher} reaches ${day} P${period + 1} contiguously across another class`;
@@ -366,8 +431,10 @@ function generateTimetableAttempt(model, options = {}) {
     if (kind === 'theory') {
       const dayCells = schedule[day];
       const sameDay = dayCells.filter(cell => cell?.subjectId === subject.id && cell.kind === 'theory').length;
-      const dailyCap = fixedLabDays(model, subject.id).has(day) ? 1 : (subject.theoryPeriods > DAYS.length ? 2 : 1);
-      if (sameDay >= dailyCap) return `${subject.name} already reaches its ${dailyCap}-per-day cap on ${day}`;
+      const dailyCap = theoryDailyCap(schedule, subject, day);
+      const labPeriods = labPeriodsOnDay(schedule, subject.id, day);
+      if (dailyCap === 0) return `${subject.name} has ${labPeriods} lab periods on ${day}, so R25 forbids any theory period that day`;
+      if (sameDay >= dailyCap) return `${subject.name} already reaches its ${dailyCap}-per-day cap on ${day}${labPeriods >= 2 ? ' because of its lab block' : ''}`;
       if (dayCells[period - 1]?.subjectId === subject.id || dayCells[period + 1]?.subjectId === subject.id) return `adjacent ${subject.name} hours on ${day}`;
       if (period === 0 && DAYS.some(otherDay => otherDay !== day && schedule[otherDay][0]?.subjectId === subject.id)) return `Period 1 is already occupied by ${subject.subjectCode} on another day`;
       const teacherHoursKey = `${teacher}-${day}`;

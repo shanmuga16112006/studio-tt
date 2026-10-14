@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRows, validateRows } from '../src/data-model.js';
+import { normalizeRows, validateRows, classAdvisorFor, setClassCc, setClassHod, departmentOf } from '../src/data-model.js';
 import { validateManualReservation } from '../src/manual-periods.js';
 
 test('normalizes the supplied section-marker workbook format', () => {
@@ -155,4 +155,46 @@ test('treats SDC and Skill Development Course as Placement manual periods', () =
   assert.deepEqual(result.subjects.map(subject => subject.manualKind), ['placement', 'placement', 'placement']);
   assert.deepEqual(result.subjects.map(subject => subject.placementPeriods), [2, 1, 2]);
   assert.equal(result.subjects.some(subject => subject.labPeriods > 0), false);
+});
+
+test('enforces exactly one CC per class when toggling the CC role', () => {
+  const alice = { name: 'Alice', ccFor: [] };
+  const bob = { name: 'Bob', ccFor: [] };
+  const teachers = { Alice: alice, Bob: bob };
+  assert.equal(setClassCc(teachers, alice, 'AIDS'), true);
+  assert.deepEqual(alice.ccFor, ['AIDS']);
+  assert.equal(setClassCc(teachers, bob, 'AIDS'), true);
+  assert.deepEqual(alice.ccFor, [], 'starting a new CC clears the previous CC for that class');
+  assert.deepEqual(bob.ccFor, ['AIDS']);
+  assert.equal(setClassCc(teachers, alice, 'CSE'), true);
+  assert.deepEqual(alice.ccFor, ['CSE']);
+  assert.deepEqual(bob.ccFor, ['AIDS'], 'CC roles are scoped per class');
+  assert.equal(setClassCc(teachers, alice, 'CSE'), false);
+  assert.deepEqual(alice.ccFor, []);
+});
+
+test('derives the class advisor from the selected CC and falls back to metadata', () => {
+  const model = {
+    staff: [{ name: 'Alice', ccFor: ['AIDS'] }, { name: 'Bob', ccFor: ['CSE'] }],
+    metadata: { classAdvisor: 'Legacy Advisor' }
+  };
+  assert.equal(classAdvisorFor(model, 'AIDS'), 'Alice');
+  assert.equal(classAdvisorFor(model, 'CSE'), 'Bob');
+  assert.equal(classAdvisorFor(model, 'ECE'), 'Legacy Advisor');
+  assert.equal(classAdvisorFor({ staff: [], metadata: { classAdvisors: { ECE: 'Dr. Rao' } } }, 'ECE'), 'Dr. Rao');
+});
+
+test('resolves the department of a section and toggles HOD per department', () => {
+  assert.equal(departmentOf('AIDS(A)'), 'AIDS');
+  assert.equal(departmentOf('AIDS (B)'), 'AIDS');
+  assert.equal(departmentOf('AIDS'), 'AIDS');
+  assert.equal(departmentOf('CSE'), 'CSE');
+  assert.equal(departmentOf(''), '');
+
+  const alice = { name: 'Alice', hodFor: [] };
+  const teachers = { Alice: alice };
+  assert.equal(setClassHod(teachers, alice, 'AIDS(A)'), true);
+  assert.deepEqual(alice.hodFor, ['AIDS'], 'the HOD role is stored at department scope');
+  assert.equal(setClassHod(teachers, alice, 'AIDS(B)'), false, 'a sibling section toggles the same department HOD off');
+  assert.deepEqual(alice.hodFor, []);
 });

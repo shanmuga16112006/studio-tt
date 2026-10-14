@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderShell, renderSetup, renderTeacherTimetable, renderLabTimetable } from '../src/ui.js';
+import { renderShell, renderSetup, renderTeacherTimetable, renderLabTimetable, renderGenerated } from '../src/ui.js';
 
 test('offers class and teacher formats in the top selector', () => {
   const html = renderShell();
@@ -133,4 +133,12 @@ test('preselects the saved starting period and day of a Placement reservation', 
   assert.match(html, /<select data-manual-day="p" data-manual-index="0">[\s\S]*?<option value="WED" selected>Wednesday<\/option>/);
   assert.match(html, /<select data-manual-period="p" data-manual-index="1">[\s\S]*?<option value="4" selected>4<\/option>/);
   assert.match(html, /Periods 3-4/);
+});
+
+test('binds the Year / Semester and W.e.f. values into the generated document details', () => {
+  const week = () => ({ MON: Array(8).fill(null), TUE: Array(8).fill(null), WED: Array(8).fill(null), THU: Array(8).fill(null), FRI: Array(8).fill(null), SAT: Array(8).fill(null) });
+  const model = { metadata: { yearSem: 'III / V Semester', effectiveDate: '14-10-2026' }, subjects: [], staff: [], classes: ['AIDS'] };
+  const html = renderGenerated({ ...week(), className: 'AIDS' }, model, []);
+  assert.match(html, /<input id="year-sem" value="III \/ V Semester"/);
+  assert.match(html, /<input id="effective-date" value="14-10-2026"/);
 });

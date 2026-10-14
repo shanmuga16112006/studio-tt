@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DAYS, createDefaultSlots, generateTimetable, regenerateClassTimetable, checkSchedule, checkExtracurricularSchedule } from '../src/scheduler.js';
+import { DAYS, createDefaultSlots, generateTimetable, regenerateClassTimetable, checkSchedule, checkExtracurricularSchedule, checkDailyLabTheoryRestriction, extracurricularStarts, firstPeriodRoleBlock } from '../src/scheduler.js';
 
 test('creates the eight teaching periods and fixed breaks', () => {
   const slots = createDefaultSlots();
@@ -198,6 +198,56 @@ test('applies HOD and CC first-hour rules independently for each class', () => {
   assert.equal(DAYS.some(day => result.schedules.CSE[day][0]?.teacher === 'T1'), true);
 });
 
+test('bars an HOD from Period 1 in every section of the same department', () => {
+  const sections = ['AIDS(A)', 'AIDS(B)', 'AIDS(C)'];
+  const model = {
+    classes: sections, settings: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'], scheduleSeed: 5 },
+    teachers: { T1: { name: 'T1', unavailable: [], externalHours: {}, hodFor: ['AIDS(A)'], ccFor: [] } },
+    subjects: sections.map((section, index) => ({ id: `s${index}`, className: section, acronym: `S${index}`, code: `C${index}`, name: `Subject ${index}`, teacher: 'T1', theoryPeriods: 3, labPeriods: 0 })),
+    labs: []
+  };
+  const result = generateTimetable(model);
+  for (const section of sections) {
+    assert.equal(DAYS.some(day => result.schedules[section][day][0]?.teacher === 'T1'), false, `${section} Period 1 must stay free of the department HOD`);
+  }
+});
+
+test('firstPeriodRoleBlock keeps HOD bar in the department, CC bar in the class and Monday free', () => {
+  const model = {
+    teachers: {
+      HOD: { name: 'HOD', hodFor: ['AIDS'], ccFor: [] },
+      CC: { name: 'CC', hodFor: [], ccFor: ['AIDS(A)'] },
+      PLAIN: { name: 'PLAIN', hodFor: [], ccFor: [] }
+    }
+  };
+  for (const day of DAYS) {
+    const block = firstPeriodRoleBlock(model, 'HOD', 'AIDS', day);
+    assert.equal(block?.rule, 'R1', `HOD must be barred every ${day}`);
+    assert.equal(firstPeriodRoleBlock(model, 'HOD', 'AIDS(B)', day)?.rule, 'R1', 'HOD bars every section of the department');
+    assert.equal(firstPeriodRoleBlock(model, 'HOD', 'CSE', day), null, 'HOD does not bar another department');
+  }
+  assert.equal(firstPeriodRoleBlock(model, 'CC', 'AIDS(A)', 'MON'), null, 'CC may teach Period 1 on Monday');
+  for (const day of ['TUE', 'WED', 'THU', 'FRI', 'SAT']) {
+    assert.equal(firstPeriodRoleBlock(model, 'CC', 'AIDS(A)', day)?.rule, 'R11', `CC is barred on ${day}`);
+  }
+  assert.equal(firstPeriodRoleBlock(model, 'CC', 'AIDS(B)', 'WED'), null, 'CC only bars its own class');
+  assert.equal(firstPeriodRoleBlock(model, 'PLAIN', 'AIDS', 'WED'), null, 'unflagged staff are unrestricted');
+});
+
+test('toggling an HOD role off restores Period 1 eligibility for the department', () => {
+  const sections = ['AIDS(A)', 'AIDS(B)'];
+  const base = {
+    classes: sections, settings: { days: DAYS, scheduleSeed: 7 }, labs: [],
+    subjects: sections.map((section, index) => ({ id: `s${index}`, className: section, acronym: `S${index}`, code: `C${index}`, name: `Subject ${index}`, teacher: 'T1', theoryPeriods: 3, labPeriods: 0 }))
+  };
+  const withHod = { ...base, teachers: { T1: { name: 'T1', hodFor: ['AIDS'], ccFor: [] } } };
+  const barred = generateTimetable(withHod);
+  assert.equal(DAYS.some(day => sections.some(section => barred.schedules[section][day][0]?.teacher === 'T1')), false);
+  const cleared = { ...base, teachers: { T1: { name: 'T1', hodFor: [], ccFor: [] } } };
+  const allowed = generateTimetable(cleared);
+  assert.equal(DAYS.some(day => allowed.schedules['AIDS(A)'][day][0]?.teacher === 'T1'), true, 'Period 1 is available again once HOD is toggled off');
+});
+
 test('treats unavailable first-period preferences as warnings during regeneration', () => {
   const model = {
     classes: ['AIDS'], settings: { scheduleSeed: 1 }, teachers: {},
@@ -270,8 +320,55 @@ test('places every extracurricular subject as one continuous same-day block rega
     assert.equal(new Set(placements.map(item => item.day)).size, 1);
     const periods = placements.map(item => item.period).sort((a, b) => a - b);
     assert.deepEqual(periods, Array.from({ length: theoryPeriods }, (_, index) => periods[0] + index));
-    assert.equal(placements.every(item => item.period >= 2), true);
+    assert.equal(placements.every(item => item.period >= 2 || (theoryPeriods === 1 && item.period === 0)), true);
     assert.equal(result.diagnostics.some(item => item.rule === 'R23'), false);
+  }
+});
+
+test('R26 offers Period 1 only to single-period extracurricular activities', () => {
+  assert.equal(extracurricularStarts(1).includes(0), true);
+  assert.equal(extracurricularStarts(2).includes(0), false);
+  assert.equal(extracurricularStarts(3).includes(0), false);
+});
+
+test('R26 accepts one single-period extracurricular in Period 1 and rejects a second day', () => {
+  const single = {
+    classes: ['AIDS'], settings: { scheduleSeed: 1 }, teachers: {},
+    subjects: [{ id: 'act', className: 'AIDS', acronym: 'ACT', code: 'EC1', name: 'Activity', teacher: 'T1', theoryPeriods: 1, labPeriods: 0, isExtracurricular: true }],
+    labs: []
+  };
+  const week = Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
+  week.className = 'AIDS';
+  week.MON[0] = { subjectId: 'act', subjectCode: 'EC1', acronym: 'ACT', subjectName: 'Activity', teacher: 'T1', period: 0, kind: 'activity' };
+  assert.deepEqual(checkExtracurricularSchedule(week, single), []);
+
+  const secondDay = structuredClone(week);
+  secondDay.TUE[0] = { ...week.MON[0], period: 0 };
+  const diagnostics = checkExtracurricularSchedule(secondDay, single);
+  assert.equal(diagnostics.some(item => item.rule === 'R26'), true);
+});
+
+test('R26 still bars a multi-period extracurricular from Period 1', () => {
+  const multi = {
+    classes: ['AIDS'], settings: { scheduleSeed: 1 }, teachers: {},
+    subjects: [{ id: 'act', className: 'AIDS', acronym: 'ACT', code: 'EC1', name: 'Activity', teacher: 'T1', theoryPeriods: 2, labPeriods: 0, isExtracurricular: true }],
+    labs: []
+  };
+  const week = Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
+  week.className = 'AIDS';
+  week.MON[0] = { subjectId: 'act', subjectCode: 'EC1', acronym: 'ACT', subjectName: 'Activity', teacher: 'T1', period: 0, kind: 'activity' };
+  week.MON[1] = { ...week.MON[0], period: 1 };
+  assert.equal(checkExtracurricularSchedule(week, multi).some(item => item.rule === 'R23'), true);
+});
+
+test('R26 keeps at most one single-period extracurricular in Period 1 per week', () => {
+  const subjects = [0, 1, 2].map(index => ({ id: `act-${index}`, className: 'AIDS', acronym: `A${index}`, code: `EC${index}`, name: `Activity ${index}`, teacher: `T${index}`, theoryPeriods: 1, labPeriods: 0, isExtracurricular: true }));
+  for (const seed of Array.from({ length: 20 }, (_, index) => index)) {
+    const result = generateTimetable({ classes: ['AIDS'], settings: { scheduleSeed: seed }, teachers: {}, subjects, labs: [] });
+    const periodOneDays = DAYS.filter(day => result.schedules.AIDS[day][0]?.kind === 'activity');
+    assert.ok(periodOneDays.length <= 1, `seed ${seed}: ${periodOneDays.join(', ')}`);
+    assert.equal(result.diagnostics.some(item => item.rule === 'R26'), false, `seed ${seed}`);
+    assert.equal(result.diagnostics.some(item => item.rule === 'R23'), false, `seed ${seed}`);
   }
 });
 
@@ -867,5 +964,90 @@ test('places a CC subject in Monday Period 1 when it is otherwise eligible', () 
   const result = generateTimetable(model);
   assert.equal(result.diagnostics.some(item => item.rule === 'R11'), false);
   assert.equal(DAYS.some(day => result.schedules.AIDS[day][0]?.teacher === 'T2'), true);
+});
+
+test('R25 forbids every theory period on a day that already holds 3 or more lab periods', () => {
+  const model = {
+    classes: ['AIDS'], settings: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'], scheduleSeed: 4 }, teachers: {},
+    subjects: [
+      { id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Big Lab', teacher: 'T1', theoryPeriods: 3, labPeriods: 3 },
+      { id: 'b', className: 'AIDS', acronym: 'SUB', code: 'S1', name: 'Filler', teacher: 'T2', theoryPeriods: 6, labPeriods: 0 }
+    ],
+    labs: [{ subjectId: 'a', className: 'AIDS', day: 'MON', startPeriod: 5, length: 3 }]
+  };
+  const result = generateTimetable(model);
+  const schedule = result.schedules.AIDS;
+  const monday = schedule.MON.filter(cell => cell?.subjectId === 'a');
+  assert.deepEqual(monday.map(cell => cell.period), [4, 5, 6]);
+  assert.equal(monday.every(cell => cell.kind === 'lab'), true);
+  assert.equal(DAYS.flatMap(day => schedule[day]).filter(cell => cell?.subjectId === 'a' && cell.kind === 'theory').length, 3);
+  assert.equal(result.diagnostics.some(item => item.rule === 'R25' && item.severity === 'error'), false);
+});
+
+test('R25 allows at most one theory period on a day that has exactly two lab periods', () => {
+  const model = {
+    classes: ['AIDS'], settings: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'], scheduleSeed: 6 }, teachers: {},
+    subjects: [
+      { id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Two Lab', teacher: 'T1', theoryPeriods: 3, labPeriods: 2 },
+      { id: 'b', className: 'AIDS', acronym: 'SUB', code: 'S1', name: 'Filler', teacher: 'T2', theoryPeriods: 6, labPeriods: 0 }
+    ],
+    labs: [{ subjectId: 'a', className: 'AIDS', day: 'MON', startPeriod: 5, length: 2 }]
+  };
+  const result = generateTimetable(model);
+  const schedule = result.schedules.AIDS;
+  const mondayTheory = schedule.MON.filter(cell => cell?.subjectId === 'a' && cell.kind === 'theory');
+  assert.equal(mondayTheory.length <= 1, true);
+  assert.equal(result.diagnostics.some(item => item.rule === 'R25' && item.severity === 'error'), false);
+});
+
+test('R25 keeps the lab block continuous and at its required duration', () => {
+  const model = {
+    classes: ['AIDS'], settings: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'], scheduleSeed: 8 }, teachers: {},
+    subjects: [{ id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Lab', teacher: 'T1', theoryPeriods: 0, labPeriods: 4 }],
+    labs: [{ subjectId: 'a', className: 'AIDS', day: 'WED', startPeriod: 4, length: 4 }]
+  };
+  const result = generateTimetable(model);
+  const periods = result.schedules.AIDS.WED.filter(cell => cell?.subjectId === 'a' && cell.kind === 'lab').map(cell => cell.period).sort((left, right) => left - right);
+  assert.deepEqual(periods, [3, 4, 5, 6]);
+  assert.equal(result.diagnostics.some(item => item.rule === 'R25'), false);
+});
+
+test('R25 validation flags a hand-built theory period on a 3-lab day', () => {
+  const model = { classes: ['AIDS'], teachers: {}, subjects: [{ id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Big Lab', teacher: 'T1', theoryPeriods: 3, labPeriods: 3 }], labs: [] };
+  const week = Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
+  week.className = 'AIDS';
+  [2, 3, 4].forEach(period => { week.MON[period] = { subjectId: 'a', subjectCode: 'L1', acronym: 'LAB', subjectName: 'Big Lab', teacher: 'T1', period, kind: 'lab' }; });
+  week.MON[0] = { subjectId: 'a', subjectCode: 'L1', acronym: 'LAB', subjectName: 'Big Lab', teacher: 'T1', period: 0, kind: 'theory' };
+  const diagnostics = checkDailyLabTheoryRestriction(week, model);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].rule, 'R25');
+  assert.match(diagnostics[0].message, /must not be scheduled for any theory period/);
+});
+
+test('R25 validation allows exactly one theory period on a 2-lab day but rejects a second', () => {
+  const model = { classes: ['AIDS'], teachers: {}, subjects: [{ id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Two Lab', teacher: 'T1', theoryPeriods: 3, labPeriods: 2 }], labs: [] };
+  const build = theoryPeriods => {
+    const week = Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
+    week.className = 'AIDS';
+    [4, 5].forEach(period => { week.MON[period] = { subjectId: 'a', subjectCode: 'L1', acronym: 'LAB', subjectName: 'Two Lab', teacher: 'T1', period, kind: 'lab' }; });
+    theoryPeriods.forEach(period => { week.MON[period] = { subjectId: 'a', subjectCode: 'L1', acronym: 'LAB', subjectName: 'Two Lab', teacher: 'T1', period, kind: 'theory' }; });
+    return week;
+  };
+  assert.deepEqual(checkDailyLabTheoryRestriction(build([0]), model), []);
+  const diagnostics = checkDailyLabTheoryRestriction(build([0, 1]), model);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].rule, 'R25');
+  assert.match(diagnostics[0].message, /at most 1 theory period is allowed/);
+});
+
+test('R25 validation reports a non-continuous lab block', () => {
+  const model = { classes: ['AIDS'], teachers: {}, subjects: [{ id: 'a', className: 'AIDS', acronym: 'LAB', code: 'L1', name: 'Lab', teacher: 'T1', theoryPeriods: 0, labPeriods: 3 }], labs: [] };
+  const week = Object.fromEntries(DAYS.map(day => [day, Array(8).fill(null)]));
+  week.className = 'AIDS';
+  [2, 4, 5].forEach(period => { week.MON[period] = { subjectId: 'a', subjectCode: 'L1', acronym: 'LAB', subjectName: 'Lab', teacher: 'T1', period, kind: 'lab' }; });
+  const diagnostics = checkDailyLabTheoryRestriction(week, model);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].rule, 'R25');
+  assert.match(diagnostics[0].message, /not continuous/);
 });
 

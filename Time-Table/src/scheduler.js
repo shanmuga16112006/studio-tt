@@ -11,10 +11,15 @@ export const SLOT_DEFS = [
   { period: 7, label: '03.50–04.30', teaching: true }
 ];
 export const ACTIVITY_TEACHING_RUNS = [[2, 3], [4, 5], [6, 7]];
+// The Lunch break sits between teaching period index 3 (Period 4) and index 4 (Period 5).
+// A 3-period extracurricular must stay entirely after Lunch (R23), so it may only start at
+// index 4 (P5–P7) or 5 (P6–P8); it may span the short Break between P6 and P7 but never Lunch.
+export const LUNCH_AFTER_PERIOD = 3;
 export function extracurricularStarts(length) {
   const starts = [];
   if (length > 2) {
-    for (let start = 2; start + length - 1 <= 7; start++) starts.push(start);
+    const first = length === 3 ? LUNCH_AFTER_PERIOD + 1 : 2;
+    for (let start = first; start + length - 1 <= 7; start++) starts.push(start);
     return starts;
   }
   if (length === 1) starts.push(0);
@@ -143,8 +148,11 @@ export function feasibilityDiagnostics(model) {
     const length = subject.theoryPeriods;
     const teacher = teacherName(subject);
     const starts = extracurricularStarts(length);
+    const windowLabel = length === 3
+      ? '3 consecutive periods after Lunch (Period 5–6–7 or Period 6–7–8)'
+      : `${length} consecutive periods starting at Period 3 or later`;
     if (!starts.length) {
-      diagnostics.push({ rule: 'R23', severity: 'error', className: subject.className, subjectId: subject.id, message: `${subject.name} needs ${length} consecutive periods starting at Period 3 or later, but only 6 teaching periods are available from Period 3 to Period 8.` });
+      diagnostics.push({ rule: 'R23', severity: 'error', className: subject.className, subjectId: subject.id, message: `${subject.name} needs ${windowLabel}, but only 6 teaching periods are available from Period 3 to Period 8.` });
       continue;
     }
     const anyWindow = DAYS.some(day => starts.some(start => {
@@ -152,7 +160,7 @@ export function feasibilityDiagnostics(model) {
       return periods.every(period => period < 8 && !unavailable(model, teacher, day, period));
     }));
     if (!anyWindow) {
-      diagnostics.push({ rule: 'R23', severity: 'error', className: subject.className, subjectId: subject.id, message: `${subject.name} (${length} consecutive periods starting at Period 3 or later) cannot be placed because ${teacher} is unavailable during every eligible window on every day.` });
+      diagnostics.push({ rule: 'R23', severity: 'error', className: subject.className, subjectId: subject.id, message: `${subject.name} (${windowLabel}) cannot be placed because ${teacher} is unavailable during every eligible window on every day.` });
     }
   }
   return diagnostics;
@@ -191,9 +199,12 @@ export function checkExtracurricularSchedule(schedule, model) {
     if (length <= 2 && !allowedSinglePeriodStart) {
       const runOf = period => ACTIVITY_TEACHING_RUNS.findIndex(([first, last]) => period >= first && period <= last);
       if (periods.some(period => runOf(period) === -1) || new Set(periods.map(runOf)).size !== 1) {
-        const label = `A ${length}-period extracurricular activity must stay inside one uninterrupted teaching run and may not cross a Break or Lunch; only activities of 3 or more periods may span a Break or Lunch.`;
+        const label = `A ${length}-period extracurricular activity must stay inside one uninterrupted teaching run and may not cross a Break or Lunch; only activities of 3 or more periods may span a Break, and a 3-period activity may still never cross Lunch.`;
         diagnostics.push({ ...base, day, message: `${subject.name} occupies ${periods.map(period => period + 1).join(', ')} on ${day}, which crosses a Break or Lunch. ${label}` });
       }
+    }
+    if (length === 3 && periods[0] <= LUNCH_AFTER_PERIOD && periods[periods.length - 1] > LUNCH_AFTER_PERIOD) {
+      diagnostics.push({ ...base, day, message: `${subject.name} occupies ${periods.map(period => period + 1).join(', ')} on ${day}, which crosses the Lunch break. A 3-period extracurricular activity must be scheduled after Lunch (Period 5–6–7 or Period 6–7–8); it may occupy a regular Break to stay consecutive but must never be split across Lunch.` });
     }
   }
   const firstPeriodDays = DAYS.filter(day => (schedule[day] || [])[0]?.kind === 'activity');

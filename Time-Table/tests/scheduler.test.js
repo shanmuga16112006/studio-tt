@@ -427,13 +427,24 @@ test('R23 rejects a shortened or split extracurricular block', () => {
   assert.match(gapped[0].message, /consecutive periods without a gap/);
 });
 
-test('R23 forbids a 2-period block from crossing Break/Lunch but allows a 3-period block to span them', () => {
+test('R23 forbids a 2-period block from crossing Break/Lunch and a 3-period block from crossing Lunch', () => {
   const crossing = checkExtracurricularSchedule(activityWeek([3, 4]), activityModel);
   assert.equal(crossing.length, 1);
   assert.equal(crossing[0].rule, 'R23');
   assert.match(crossing[0].message, /crosses a Break or Lunch/);
   const model3 = { ...activityModel, subjects: activityModel.subjects.map(subject => subject.id === 'act' ? { ...subject, theoryPeriods: 3 } : subject) };
-  assert.deepEqual(checkExtracurricularSchedule(activityWeek([2, 3, 4]), model3), []);
+  const acrossLunch = checkExtracurricularSchedule(activityWeek([2, 3, 4]), model3);
+  assert.equal(acrossLunch.length, 1);
+  assert.equal(acrossLunch[0].rule, 'R23');
+  assert.match(acrossLunch[0].message, /crosses the Lunch break/);
+  assert.deepEqual(checkExtracurricularSchedule(activityWeek([4, 5, 6]), model3), []);
+  assert.deepEqual(checkExtracurricularSchedule(activityWeek([5, 6, 7]), model3), []);
+});
+
+test('R23 restricts 3-period extracurricular activities to the post-lunch starts', () => {
+  assert.deepEqual(extracurricularStarts(3), [4, 5]);
+  assert.equal(extracurricularStarts(2).includes(3), false);
+  assert.equal(extracurricularStarts(2).includes(2), true);
 });
 
 test('places a 3-period extracurricular activity as one continuous same-day block from Period 3 onward', () => {
@@ -447,9 +458,27 @@ test('places a 3-period extracurricular activity as one continuous same-day bloc
     const placements = DAYS.flatMap(day => result.schedules.AIDS[day].filter(cell => cell?.subjectId === 'act').map(cell => ({ day, period: cell.period }))).sort((left, right) => left.period - right.period);
     assert.equal(placements.length, length, `length ${length}`);
     assert.equal(new Set(placements.map(item => item.day)).size, 1, `length ${length}`);
-    assert.equal(placements[0].period >= 2, true, `length ${length} start`);
+    assert.equal(placements[0].period >= (length === 3 ? 4 : 2), true, `length ${length} start`);
     assert.equal(placements.every((item, index) => index === 0 || item.period === placements[index - 1].period + 1), true, `length ${length} continuous`);
     assert.equal(result.diagnostics.some(item => item.rule === 'R23'), false, `length ${length}`);
+  }
+});
+
+test('R23 keeps a generated 3-period extracurricular activity after Lunch and off the Lunch break', () => {
+  for (const seed of Array.from({ length: 24 }, (_, index) => index)) {
+    const model = {
+      classes: ['AIDS'], settings: { scheduleSeed: seed }, teachers: {},
+      subjects: [{ id: 'act', className: 'AIDS', acronym: 'ACT', code: 'EC1', name: 'Activity', teacher: 'T1', theoryPeriods: 3, labPeriods: 0, isExtracurricular: true }],
+      labs: []
+    };
+    const result = generateTimetable(model);
+    const placements = DAYS.flatMap(day => result.schedules.AIDS[day].filter(cell => cell?.subjectId === 'act').map(cell => ({ day, period: cell.period }))).sort((left, right) => left.period - right.period);
+    assert.equal(placements.length, 3, `seed ${seed}`);
+    assert.equal(new Set(placements.map(item => item.day)).size, 1, `seed ${seed}`);
+    assert.ok(placements[0].period >= 4, `seed ${seed}: block starts at index ${placements[0].period}`);
+    assert.ok(placements[2].period <= 7, `seed ${seed}: block ends at index ${placements[2].period}`);
+    assert.deepEqual(placements.map(item => item.period), [placements[0].period, placements[0].period + 1, placements[0].period + 2], `seed ${seed}`);
+    assert.equal(result.diagnostics.some(item => item.rule === 'R23'), false, `seed ${seed}`);
   }
 });
 
